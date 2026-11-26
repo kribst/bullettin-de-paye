@@ -35,6 +35,15 @@ async function httpTransport({ method, path, query, headers, body }) {
   return { status: res.status, headers: h, body: await res.arrayBuffer() };
 }
 
+function readCsrfCookie() {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("csrftoken="));
+  return match ? decodeURIComponent(match.slice(match.indexOf("=") + 1)) : null;
+}
+
 async function encodeForm(form) {
   // serialise a FormData into a multipart body (the demo has no real network stack)
   const req = new Request("http://local/", { method: "POST", body: form });
@@ -49,7 +58,10 @@ export async function request(method, path, { json, form, query, blob } = {}) {
     body = JSON.stringify(json);
   }
   if (form) body = form;
-  if (method !== "GET" && csrfToken) headers["X-CSRFToken"] = csrfToken;
+  if (method !== "GET") {
+    const token = csrfToken || readCsrfCookie();
+    if (token) headers["X-CSRFToken"] = token;
+  }
   const q = query ? new URLSearchParams(Object.entries(query).filter(([, v]) => v !== undefined && v !== null && v !== "")).toString() : "";
   let res;
   if (__DEMO__) {

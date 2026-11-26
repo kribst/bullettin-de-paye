@@ -161,7 +161,7 @@ function useCounts(isHR, pathname) {
 
 export function AppShell() {
   const { t } = useI18n();
-  const { user, isHR, logout } = useAuth();
+  const { user, isHR, isCompanyAdmin, logout } = useAuth();
   const [open, setOpen] = useState(false);
   const loc = useLocation();
   const navigate = useNavigate();
@@ -181,6 +181,7 @@ export function AppShell() {
     ["group", t("nav.g_pay")],
     ["/hr/payroll", t("nav.payroll"), Wallet],
     ["/hr/recruitment", t("nav.recruitment"), Briefcase, false, counts.applications],
+    ...(isCompanyAdmin ? [["/hr/accounts", t("nav.accounts"), Users]] : []),
   ];
   const meNav = [
     ["group", t("nav.g_me")],

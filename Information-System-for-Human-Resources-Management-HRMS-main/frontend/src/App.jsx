@@ -16,6 +16,7 @@ import Leaves from "./pages/hr/Leaves.jsx";
 import Attendance from "./pages/hr/Attendance.jsx";
 import Payroll from "./pages/hr/Payroll.jsx";
 import Recruitment from "./pages/hr/Recruitment.jsx";
+import Accounts from "./pages/hr/Accounts.jsx";
 import MyHome from "./pages/me/MyHome.jsx";
 import MyLeaves from "./pages/me/MyLeaves.jsx";
 import MyAttendance from "./pages/me/MyAttendance.jsx";
@@ -64,6 +65,7 @@ function Root() {
           <Route path="attendance" element={<Attendance />} />
           <Route path="payroll" element={<Payroll />} />
           <Route path="recruitment" element={<Recruitment />} />
+          <Route path="accounts" element={<Accounts />} />
         </Route>
         <Route path="/me" element={<RequireEmployee />}>
           <Route index element={<MyHome />} />

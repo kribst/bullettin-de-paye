@@ -12,7 +12,9 @@ def spa(request):
 
 
 urlpatterns = [
-    path("api/auth/", include("accounts.urls")),
+    path("api/auth/", include("accounts.auth_urls")),
+    path("api/", include("accounts.companies_urls")),
+    path("api/accounts/", include("accounts.users_urls")),
     path("api/", include("hr.urls")),
     re_path(r"^(?!api/|admin/|static/|media/).*$", spa),
 ]

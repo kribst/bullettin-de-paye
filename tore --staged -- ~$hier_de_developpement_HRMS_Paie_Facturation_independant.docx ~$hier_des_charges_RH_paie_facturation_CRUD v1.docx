@@ -1,0 +1,37 @@
+ ...oppement_HRMS_Paie_Facturation_independant.docx | Bin [31m0[m -> [32m60322[m bytes
+ .../backend/accounts/admin.py                      |  67 [32m+++[m[31m-[m
+ .../backend/accounts/auth_urls.py                  |  11 [32m+[m
+ .../backend/accounts/companies_urls.py             |  16 [32m+[m
+ ...y_alter_user_role_user_company_companyleader.py |  61 [32m++++[m
+ .../accounts/migrations/0004_backfill_company.py   |  34 [32m++[m
+ ...options_alter_companyleader_options_and_more.py |  28 [32m++[m
+ .../accounts/migrations/0006_alter_user_role.py    |  24 [32m++[m
+ .../backend/accounts/models.py                     | 165 [32m+++++++++[m[31m-[m
+ .../backend/accounts/permissions.py                | 139 [32m+++++++++[m
+ .../backend/accounts/serializers.py                | 151 [32m+++++++++[m
+ .../backend/accounts/tests/__init__.py             |   0
+ .../backend/accounts/tests/test_company_user.py    | 310 [32m+++++++++++++++++++[m
+ .../backend/accounts/tests/test_role_migration.py  |  34 [32m++[m
+ .../backend/accounts/users_urls.py                 |  11 [32m+[m
+ .../backend/accounts/views.py                      | 343 [32m++++++++++++++++++++[m[31m-[m
+ .../backend/config/urls.py                         |   4 [32m+[m[31m-[m
+ .../backend/hr/admin.py                            |  33 [32m+[m[31m-[m
+ .../backend/hr/management/commands/seed_demo.py    |  23 [32m+[m[31m-[m
+ .../0002_employee_company_service_company.py       |  25 [32m++[m
+ .../migrations/0003_service_unique_per_company.py  |  23 [32m++[m
+ .../backend/hr/models.py                           |   9 [32m+[m[31m-[m
+ .../backend/hr/rules.py                            |  20 [32m+[m[31m-[m
+ .../backend/hr/views.py                            | 200 [32m+++++++++[m[31m---[m
+ .../frontend/scripts/check-i18n.mjs                |   3 [32m+[m[31m-[m
+ .../frontend/src/App.jsx                           |   2 [32m+[m
+ .../frontend/src/api.js                            |  14 [32m+[m[31m-[m
+ .../frontend/src/auth.jsx                          |  10 [32m+[m[31m-[m
+ .../frontend/src/layout.jsx                        |   3 [32m+[m[31m-[m
+ .../frontend/src/locales.js                        |  40 [32m+++[m
+ .../frontend/src/pages/hr/Accounts.jsx             | 107 [32m+++++++[m
+ Plan_de_developpement_HRMS_Paie_Facturation.docx   | Bin [31m0[m -> [32m53345[m bytes
+ Plan_de_developpement_HRMS_Paie_Facturation.pdf    | Bin [31m0[m -> [32m122894[m bytes
+ ...er_des_charges_RH_paie_facturation_CRUD v1.docx | Bin
+ ...cturation.docx => module de develloppement.docx | Bin [31m4875177[m -> [32m2582188[m bytes
+ payroll.docx                                       |   0
+ 36 files changed, 1834 insertions(+), 76 deletions(-)

@@ -13,11 +13,16 @@ from django.utils import timezone
 
 
 class Service(models.Model):
-    name = models.CharField(max_length=100, unique=True)
+    company = models.ForeignKey("accounts.Company", null=True, blank=True, on_delete=models.PROTECT,
+                                related_name="services")
+    name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(fields=["company", "name"], name="unique_service_name_per_company")
+        ]
 
     def __str__(self):
         return self.name
@@ -37,6 +42,8 @@ class Employee(models.Model):
     service = models.ForeignKey(Service, on_delete=models.PROTECT, related_name="employees")  # rule: every employee has a service
     position = models.CharField(max_length=120, blank=True)
     hire_date = models.DateField(default=date.today)
+    company = models.ForeignKey("accounts.Company", null=True, blank=True, on_delete=models.PROTECT,
+                                related_name="employees")
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.ACTIVE)
     skills = models.CharField(max_length=300, blank=True, help_text="comma-separated")
     created_at = models.DateTimeField(auto_now_add=True)

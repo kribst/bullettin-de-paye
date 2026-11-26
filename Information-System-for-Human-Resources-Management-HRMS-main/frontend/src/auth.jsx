@@ -37,6 +37,7 @@ export function AuthProvider({ children }) {
   useEffect(() => { refresh().catch(() => { if (!__DEMO__) setUser(null); }); }, [refresh]);
 
   const login = useCallback(async (email, password) => {
+    await api.csrf();
     const me = await api.post("/auth/login/", { email, password });
     setUser(me);
     return me;
@@ -48,7 +49,14 @@ export function AuthProvider({ children }) {
 
   const value = {
     user, settings, refresh, login, logout, setUser,
-    isHR: !!user && user.role === "hr",
+    isHR: !!user && (
+      user.role === "hr"
+      || user.role_code === "hr"
+      || user.role_code === "hr_manager"
+      || user.role_code === "payroll_manager"
+      || user.role_code === "company_admin"
+    ),
+    isCompanyAdmin: !!user && user.role_code === "company_admin",
     theme, toggleTheme: () => setTheme((x) => (x === "dark" ? "light" : "dark")),
     today: (settings && settings.today) || new Date().toISOString().slice(0, 10),
   };

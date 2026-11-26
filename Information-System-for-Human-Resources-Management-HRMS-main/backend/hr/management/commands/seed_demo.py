@@ -17,6 +17,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
+from accounts.models import Company
 from hr import rules
 from hr.models import Application, Attendance, Contract, Employee, JobOffer, Leave, Payslip, Service
 
@@ -116,7 +117,19 @@ class Command(BaseCommand):
             return
         rng = random.Random(seed)
         today = timezone.localdate()
-        services = [Service.objects.create(name=n, description=d) for n, d in SERVICES]
+        company = Company.objects.order_by("id").first()
+        if company is None:
+            company = Company.objects.create(
+                legal_name="Entreprise Démo",
+                acronym="DEMO",
+                legal_form=Company.LegalForm.OTHER,
+                country="DZ",
+                is_active=True,
+            )
+        services = [
+            Service.objects.create(name=n, description=d, company=company)
+            for n, d in SERVICES
+        ]
 
         employees = []
         for i, (first, last, s, position, salary) in enumerate(PEOPLE):
@@ -132,7 +145,7 @@ class Command(BaseCommand):
                 birth_date=date(rng.randint(1968, 2002), rng.randint(1, 12), rng.randint(1, 28)),
                 phone=f"+213 5{rng.randint(50, 69)} {rng.randint(10, 99)} {rng.randint(10, 99)} {rng.randint(10, 99)}",
                 address=f"{rng.randint(1, 120)}, rue {rng.choice(['des Frères Bouadou', 'Didouche Mourad', 'Hassiba Ben Bouali', 'Larbi Ben Mhidi', 'des Martyrs'])}, {rng.choice(DISTRICTS)}, Alger",
-                skills=SKILLS[s])
+                skills=SKILLS[s], company=company)
             employees.append((emp, salary))
 
         # contracts: mostly CDI; a few fixed-term contracts end soon; interns
@@ -155,13 +168,13 @@ class Command(BaseCommand):
 
         # accounts
         hr_user = User.objects.create_user(username="hr@demo.dz", email="hr@demo.dz", password=PASSWORD, first_name="Leila",
-                                           last_name="Hamidi", role=User.Role.HR, employee=by_name["Leila"])
+                                           last_name="Hamidi", role=User.Role.HR, employee=by_name["Leila"], company=company)
         User.objects.create_user(username="employe@demo.dz", email="employe@demo.dz", password=PASSWORD, first_name="Yasmine",
-                                 last_name="Kaci", role=User.Role.EMPLOYEE, employee=by_name["Yasmine"])
+                                 last_name="Kaci", role=User.Role.EMPLOYEE, employee=by_name["Yasmine"], company=company)
         for name in ("Amine", "Sarah", "Kamel"):
             e = by_name[name]
             User.objects.create_user(username=e.email, email=e.email, password=PASSWORD, first_name=e.first_name,
-                                     last_name=e.last_name, role=User.Role.EMPLOYEE, employee=e)
+                                     last_name=e.last_name, role=User.Role.EMPLOYEE, employee=e, company=company)
 
         # leave: past approved ones, people on leave today, pending requests, one rejected, one unpaid
         def leave(emp, typ, start, end, status, reason=""):

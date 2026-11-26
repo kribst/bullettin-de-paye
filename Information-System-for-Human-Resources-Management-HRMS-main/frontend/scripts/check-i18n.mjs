@@ -2,9 +2,10 @@
 //   node scripts/check-i18n.mjs
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { messages } from "../src/locales.js";
 
-const src = new URL("../src/", import.meta.url).pathname;
+const src = fileURLToPath(new URL("../src/", import.meta.url));
 const files = [];
 (function walk(dir) {
   for (const f of readdirSync(dir)) {

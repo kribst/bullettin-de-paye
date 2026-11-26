@@ -124,7 +124,10 @@ def leave_balance(emp: Employee, year: int | None = None, today: date | None = N
     today = today or timezone.localdate()
     year = year or today.year
     start = max(emp.hire_date, date(year, 1, 1))
-    end = min(today, date(year + 1, 1, 1))            # a full past year counts 12 months
+    if year > today.year:
+        end = date(year, 12, 31)                    # future year: full annual entitlement
+    else:
+        end = min(today, date(year + 1, 1, 1))      # a full past year counts 12 months
     accrued = Decimal(R("ANNUAL_LEAVE_DAYS_PER_MONTH")) * months_worked(start, end) if start <= end else Decimal(0)
     entitlement = min(accrued, Decimal(R("ANNUAL_LEAVE_MAX")))
     qs = emp.leaves.filter(type=Leave.Type.ANNUAL, start_date__year=year)
@@ -144,13 +147,13 @@ def validate_leave(lv: Leave, by_employee: bool = False) -> None:
     if lv.employee.status != Employee.Status.ACTIVE:
         raise RuleError("employee_inactive", "This employee is no longer active.")
     lv.days = working_days(lv.start_date, lv.end_date)
-    if lv.days == 0:
-        raise RuleError("no_working_day", "The period contains no working day.", "end_date")
     clash = (Leave.objects.filter(employee=lv.employee, status__in=[Leave.Status.PENDING, Leave.Status.APPROVED])
              .exclude(pk=lv.pk).filter(start_date__lte=lv.end_date, end_date__gte=lv.start_date).first())
     if clash:
         raise RuleError("leave_overlap", "Another leave already covers part of these dates.", "start_date",
                         other=f"{clash.start_date} → {clash.end_date}")
+    if lv.days == 0:
+        raise RuleError("no_working_day", "The period contains no working day.", "end_date")
     if lv.type == Leave.Type.SICK and not lv.reason.strip():
         raise RuleError("reason_required", "Sick leave needs a reason or a medical certificate reference.", "reason")
     limits = R("MAX_LEAVE_DAYS")
@@ -216,9 +219,12 @@ def clock(emp: Employee, now: datetime | None = None) -> Attendance:
     return rec
 
 
-def day_sheet(on: date) -> list[dict]:
+def day_sheet(on: date, company_id: int | None = None) -> list[dict]:
     """Attendance of every active employee on one day: present / absent / on_leave / not_recorded."""
-    emps = Employee.objects.filter(status=Employee.Status.ACTIVE, hire_date__lte=on).select_related("service")
+    qs = Employee.objects.filter(status=Employee.Status.ACTIVE, hire_date__lte=on).select_related("service")
+    if company_id is not None:
+        qs = qs.filter(company_id=company_id)
+    emps = qs
     recs = {a.employee_id: a for a in Attendance.objects.filter(date=on)}
     on_leave = set(Leave.objects.filter(status=Leave.Status.APPROVED, start_date__lte=on, end_date__gte=on)
                    .values_list("employee_id", flat=True))
@@ -267,12 +273,14 @@ def compute_payslip(p: Payslip) -> Payslip:
 
 
 @transaction.atomic
-def generate_payroll(period: date) -> dict:
+def generate_payroll(period: date, company_id: int | None = None) -> dict:
     """Create or refresh the draft payslips of a month for every employee with a contract in it."""
     first, last = month_bounds(period)
     created = updated = skipped = 0
     emps = Employee.objects.filter(contracts__archived=False, contracts__start_date__lte=last).filter(
         Q(contracts__end_date__isnull=True) | Q(contracts__end_date__gte=first)).distinct()
+    if company_id is not None:
+        emps = emps.filter(company_id=company_id)
     for emp in emps:
         p = Payslip.objects.filter(employee=emp, period=first).first()
         if p and p.status == Payslip.Status.VALIDATED:

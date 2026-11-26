@@ -17,6 +17,8 @@ from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle
 
+from accounts.permissions import CanManageHR, CanManagePayroll
+
 from . import rules
 from .models import Application, Attendance, Contract, Employee, JobOffer, Leave, Payslip, Service
 from .serializers import (ApplicationSerializer, AttendanceSerializer, ContractSerializer, EmployeeSerializer,
@@ -29,7 +31,27 @@ User = get_user_model()
 # ------------------------------------------------------------------------------ permissions
 class IsHR(BasePermission):
     def has_permission(self, request, view):
-        return bool(request.user and request.user.is_authenticated and request.user.is_hr)
+        user = getattr(request, "user", None)
+        if not (user and user.is_authenticated):
+            return False
+        if user.is_super_admin or user.is_superuser:
+            return True
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return bool(
+                user.is_company_admin
+                or user.is_hr_manager
+                or getattr(user, "role", None) == "hr"
+                or user.is_payroll_manager
+                or user.is_manager
+                or user.is_auditor
+                or getattr(user, "role", None) == "hr"
+            )
+        return bool(
+            user.is_company_admin
+            or user.is_hr_manager
+            or getattr(user, "role", None) == "hr"
+            or getattr(user, "is_hr", False)
+        )
 
 
 class IsEmployee(BasePermission):
@@ -39,9 +61,7 @@ class IsEmployee(BasePermission):
 
 class HROrReadOnly(BasePermission):
     def has_permission(self, request, view):
-        if not (request.user and request.user.is_authenticated):
-            return False
-        return request.method in ("GET", "HEAD", "OPTIONS") or request.user.is_hr
+        return CanManageHR().has_permission(request, view)
 
 
 def parse_month(value: str | None) -> date:
@@ -72,15 +92,28 @@ def create_account(emp: Employee) -> str:
     password = new_password()
     if User.objects.filter(username=emp.email).exists():
         raise ValidationError({"email": "A user account already uses this email."})
-    User.objects.create_user(username=emp.email, email=emp.email, password=password, first_name=emp.first_name,
-                             last_name=emp.last_name, role=User.Role.EMPLOYEE, employee=emp, must_change_password=True)
+    user = User.objects.create_user(username=emp.email, email=emp.email, password=password, first_name=emp.first_name,
+                                    last_name=emp.last_name, role=User.Role.EMPLOYEE, employee=emp,
+                                    company=emp.company, must_change_password=True)
     return password
 
 
-def on_leave_ids(on: date | None = None) -> set:
+def company_id(request) -> int | None:
+    """Id de l'entreprise de l'utilisateur connecté, ou None pour un superadministrateur (pas de cloisonnement)."""
+    user = request.user
+    if not (user and user.is_authenticated):
+        return None
+    if user.is_super_admin or user.is_superuser:
+        return None
+    return user.company_id
+
+
+def on_leave_ids(on: date | None = None, company_id: int | None = None) -> set:
     on = on or timezone.localdate()
-    return set(Leave.objects.filter(status=Leave.Status.APPROVED, start_date__lte=on, end_date__gte=on)
-               .values_list("employee_id", flat=True))
+    qs = Leave.objects.filter(status=Leave.Status.APPROVED, start_date__lte=on, end_date__gte=on)
+    if company_id is not None:
+        qs = qs.filter(employee__company_id=company_id)
+    return set(qs.values_list("employee_id", flat=True))
 
 
 # ------------------------------------------------------------------------------ services
@@ -89,7 +122,21 @@ class ServiceViewSet(viewsets.ModelViewSet):
     permission_classes = [HROrReadOnly]
 
     def get_queryset(self):
-        return Service.objects.annotate(employee_count=Count("employees", filter=Q(employees__status="active")))
+        qs = Service.objects.annotate(employee_count=Count("employees", filter=Q(employees__status="active")))
+        cid = company_id(self.request)
+        if cid is not None:
+            qs = qs.filter(company_id=cid)
+        return qs
+
+    def perform_create(self, serializer):
+        cid = company_id(self.request)
+        serializer.save(company_id=cid)
+
+    def perform_update(self, serializer):
+        cid = company_id(self.request)
+        if cid is not None and serializer.instance.company_id != cid:
+            raise ValidationError({"detail": "Service appartenant à une autre entreprise."})
+        serializer.save()
 
 
 # ------------------------------------------------------------------------------ employees
@@ -98,7 +145,10 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     permission_classes = [IsHR]
 
     def get_queryset(self):
-        qs = Employee.objects.select_related("service").prefetch_related("contracts")
+        qs = Employee.objects.select_related("service", "company").prefetch_related("contracts")
+        cid = company_id(self.request)
+        if cid is not None:
+            qs = qs.filter(company_id=cid)
         p = self.request.query_params
         if p.get("q"):
             q = p["q"].strip()
@@ -112,11 +162,28 @@ class EmployeeViewSet(viewsets.ModelViewSet):
     def get_serializer_context(self):
         return {**super().get_serializer_context(), "on_leave_ids": on_leave_ids()}
 
+    def perform_update(self, serializer):
+        cid = company_id(self.request)
+        if cid is not None:
+            service = serializer.validated_data.get("service", serializer.instance.service)
+            if service.company_id != cid:
+                raise ValidationError({"service": "Ce service appartient à une autre entreprise."})
+            if serializer.instance.company_id != cid:
+                raise ValidationError({"detail": "Cet employé appartient à une autre entreprise."})
+        serializer.save()
+
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         ser = self.get_serializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        emp = ser.save()
+        cid = company_id(request)
+        if cid is not None:
+            service = ser.validated_data.get("service")
+            if not service or service.company_id != cid:
+                raise ValidationError({"service": "Ce service appartient à une autre entreprise."})
+            emp = ser.save(company_id=cid)
+        else:
+            emp = ser.save()
         data = dict(self.get_serializer(emp).data)
         if str(request.data.get("create_account", "true")).lower() not in ("false", "0", "no"):
             data["temporary_password"] = create_account(emp)
@@ -186,6 +253,9 @@ class ContractViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = Contract.objects.select_related("employee")
+        cid = company_id(self.request)
+        if cid is not None:
+            qs = qs.filter(employee__company_id=cid)
         p = self.request.query_params
         if p.get("employee"):
             qs = qs.filter(employee_id=p["employee"])
@@ -203,14 +273,20 @@ class ContractViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         c = Contract(**serializer.validated_data)
+        cid = company_id(self.request)
+        if cid is not None and c.employee.company_id != cid:
+            raise ValidationError({"employee": "Cet employé appartient à une autre entreprise."})
         rules.validate_contract(c)
         c.save()
         serializer.instance = c
 
     def perform_update(self, serializer):
         c = serializer.instance
+        cid = company_id(self.request)
         for k, v in serializer.validated_data.items():
             setattr(c, k, v)
+        if cid is not None and c.employee.company_id != cid:
+            raise ValidationError({"employee": "Cet employé appartient à une autre entreprise."})
         rules.validate_contract(c)
         c.save()
 
@@ -230,6 +306,9 @@ class LeaveViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = Leave.objects.select_related("employee__service", "decided_by")
+        cid = company_id(self.request)
+        if cid is not None:
+            qs = qs.filter(employee__company_id=cid)
         p = self.request.query_params
         for key in ("status", "type"):
             if p.get(key):
@@ -242,6 +321,9 @@ class LeaveViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         lv = Leave(**serializer.validated_data)
+        cid = company_id(self.request)
+        if cid is not None and lv.employee.company_id != cid:
+            raise ValidationError({"employee": "Cet employé appartient à une autre entreprise."})
         rules.validate_leave(lv)
         lv.save()
         serializer.instance = lv
@@ -252,6 +334,9 @@ class LeaveViewSet(viewsets.ModelViewSet):
             raise rules.RuleError("not_pending", "Only pending requests can be modified.")
         for k, v in serializer.validated_data.items():
             setattr(lv, k, v)
+        cid = company_id(self.request)
+        if cid is not None and lv.employee.company_id != cid:
+            raise ValidationError({"employee": "Cet employé appartient à une autre entreprise."})
         rules.validate_leave(lv)
         lv.save()
 
@@ -278,6 +363,9 @@ class AttendanceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
     def get_queryset(self):
         qs = Attendance.objects.select_related("employee")
+        cid = company_id(self.request)
+        if cid is not None:
+            qs = qs.filter(employee__company_id=cid)
         p = self.request.query_params
         if p.get("employee"):
             qs = qs.filter(employee_id=p["employee"])
@@ -289,7 +377,8 @@ class AttendanceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
     @action(detail=False, methods=["get"])
     def day(self, request):
         on = parse_day(request.query_params.get("date"))
-        rows = rules.day_sheet(on)
+        cid = company_id(request)
+        rows = rules.day_sheet(on, cid)
         counts = Counter(r["state"] for r in rows)
         return Response({
             "date": on.isoformat(), "working_day": rules.is_working_day(on), "counts": counts,
@@ -300,7 +389,9 @@ class AttendanceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 
     @action(detail=False, methods=["post"])
     def mark(self, request):
-        emp = get_object_or_404(Employee, pk=request.data.get("employee"))
+        cid = company_id(request)
+        qs = Employee.objects.all() if cid is None else Employee.objects.filter(company_id=cid)
+        emp = get_object_or_404(qs, pk=request.data.get("employee"))
         on = parse_day(request.data.get("date"))
         state = request.data.get("status")
         if state not in ("present", "absent"):
@@ -321,11 +412,14 @@ class AttendanceViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
 # ------------------------------------------------------------------------------ payroll
 class PayslipViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.UpdateModelMixin, viewsets.GenericViewSet):
     serializer_class = PayslipSerializer
-    permission_classes = [IsHR]
+    permission_classes = [CanManagePayroll]
     http_method_names = ["get", "post", "patch", "head", "options"]
 
     def get_queryset(self):
         qs = Payslip.objects.select_related("employee__service")
+        cid = company_id(self.request)
+        if cid is not None:
+            qs = qs.filter(employee__company_id=cid)
         p = self.request.query_params
         if p.get("period"):
             qs = qs.filter(period=parse_month(p["period"]))
@@ -345,7 +439,7 @@ class PayslipViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.Up
 
     @action(detail=False, methods=["post"])
     def generate(self, request):
-        return Response(rules.generate_payroll(parse_month(request.data.get("period"))))
+        return Response(rules.generate_payroll(parse_month(request.data.get("period")), company_id(request)))
 
     @action(detail=True, methods=["post"])
     def validate(self, request, pk=None):
@@ -355,7 +449,11 @@ class PayslipViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.Up
     def validate_all(self, request):
         period = parse_month(request.data.get("period"))
         n = 0
-        for p in Payslip.objects.filter(period=period, status=Payslip.Status.DRAFT):
+        qs = Payslip.objects.filter(period=period, status=Payslip.Status.DRAFT)
+        cid = company_id(request)
+        if cid is not None:
+            qs = qs.filter(employee__company_id=cid)
+        for p in qs:
             rules.validate_payslip(p)
             n += 1
         return Response({"validated": n})
@@ -367,7 +465,11 @@ class JobOfferViewSet(viewsets.ModelViewSet):
     permission_classes = [IsHR]
 
     def get_queryset(self):
-        return JobOffer.objects.select_related("service").annotate(applications_count=Count("applications"))
+        qs = JobOffer.objects.select_related("service").annotate(applications_count=Count("applications"))
+        cid = company_id(self.request)
+        if cid is not None:
+            qs = qs.filter(service__company_id=cid)
+        return qs
 
 
 class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.UpdateModelMixin, viewsets.GenericViewSet):
@@ -377,6 +479,9 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
 
     def get_queryset(self):
         qs = Application.objects.select_related("offer")
+        cid = company_id(self.request)
+        if cid is not None:
+            qs = qs.filter(offer__service__company_id=cid)
         p = self.request.query_params
         if p.get("offer"):
             qs = qs.filter(offer_id=p["offer"])
@@ -408,11 +513,18 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
         service_id = request.data.get("service") or offer.service_id
         if not service_id:
             raise ValidationError({"service": "Choose the service of the new employee."})
+        cid = company_id(request)
+        if cid is not None and offer.service.company_id != cid:
+            raise ValidationError({"detail": "Cette candidature appartient à une autre entreprise."})
+        service = get_object_or_404(Service, pk=service_id)
+        if cid is not None and service.company_id != cid:
+            raise ValidationError({"service": "Ce service appartient à une autre entreprise."})
         if Employee.objects.filter(email=app.email).exists():
             raise ValidationError({"email": "An employee already uses this email."})
         start = parse_day(request.data.get("start_date"))
         emp = Employee.objects.create(first_name=app.first_name, last_name=app.last_name, email=app.email, phone=app.phone,
-                                      service_id=service_id, position=offer.title, hire_date=start)
+                                      service=service, position=offer.title, hire_date=start,
+                                      company_id=cid or service.company_id or self.request.user.company_id)
         result = {"employee": emp.id}
         salary = request.data.get("monthly_salary")
         if salary not in (None, ""):
@@ -433,14 +545,18 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
 @permission_classes([AllowAny])
 def public_jobs(request):
     today = timezone.localdate()
-    qs = JobOffer.objects.filter(status=JobOffer.Status.OPEN, deadline__gte=today).select_related("service")
+    qs = JobOffer.objects.filter(
+        status=JobOffer.Status.OPEN,
+        deadline__gte=today,
+        service__company__is_active=True,
+    ).select_related("service")
     return Response(PublicJobOfferSerializer(qs, many=True).data)
 
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def public_job(request, pk):
-    offer = get_object_or_404(JobOffer, pk=pk)
+    offer = get_object_or_404(JobOffer, pk=pk, service__company__is_active=True)
     if not offer.is_open:
         raise NotFound("This offer is closed.")
     return Response(PublicJobOfferSerializer(offer).data)
@@ -459,7 +575,7 @@ class ApplyThrottle(SimpleRateThrottle):
 @throttle_classes([ApplyThrottle])
 @parser_classes([MultiPartParser, FormParser, JSONParser])
 def public_apply(request, pk):
-    offer = get_object_or_404(JobOffer, pk=pk)
+    offer = get_object_or_404(JobOffer, pk=pk, service__company__is_active=True)
     if not offer.is_open:
         raise rules.RuleError("offer_closed", "This offer is closed.")
     ser = PublicApplicationSerializer(data=request.data)
@@ -485,19 +601,31 @@ def public_settings(request):
 @permission_classes([IsHR])
 def dashboard(request):
     today = timezone.localdate()
+    cid = company_id(request)
     active = Employee.objects.filter(status=Employee.Status.ACTIVE)
-    leave_ids = on_leave_ids(today) & set(active.values_list("id", flat=True))
-    contracts = [c for c in Contract.objects.select_related("employee").filter(archived=False) if c.state(today) == "active"]
+    if cid is not None:
+        active = active.filter(company_id=cid)
+    leave_ids = on_leave_ids(today, cid) & set(active.values_list("id", flat=True))
+    contracts_qs = Contract.objects.select_related("employee").filter(archived=False)
+    if cid is not None:
+        contracts_qs = contracts_qs.filter(employee__company_id=cid)
+    contracts = [c for c in contracts_qs if c.state(today) == "active"]
     ending = sorted([c for c in contracts if c.end_date and c.end_date <= today + timedelta(days=45)], key=lambda c: c.end_date)
-    sheet = rules.day_sheet(today)
+    sheet = rules.day_sheet(today, cid)
     last_period = Payslip.objects.order_by("-period").values_list("period", flat=True).first()
     payroll = None
     if last_period:
-        agg = Payslip.objects.filter(period=last_period).aggregate(total=Sum("net"), n=Count("id"))
+        payslips = Payslip.objects.filter(period=last_period)
+        if cid is not None:
+            payslips = payslips.filter(employee__company_id=cid)
+        agg = payslips.aggregate(total=Sum("net"), n=Count("id"))
         payroll = {"period": last_period.isoformat(), "total_net": float(agg["total"] or 0), "count": agg["n"],
-                   "validated": Payslip.objects.filter(period=last_period, status="validated").count()}
+                   "validated": payslips.filter(status="validated").count()}
     hires = Counter()
-    for d in Employee.objects.filter(hire_date__gte=today.replace(day=1) - timedelta(days=365)).values_list("hire_date", flat=True):
+    hires_qs = Employee.objects.filter(hire_date__gte=today.replace(day=1) - timedelta(days=365))
+    if cid is not None:
+        hires_qs = hires_qs.filter(company_id=cid)
+    for d in hires_qs.values_list("hire_date", flat=True):
         hires[d.strftime("%Y-%m")] += 1
     months = []
     m = today.replace(day=1)
@@ -508,22 +636,24 @@ def dashboard(request):
         "today": today.isoformat(),
         "employees": active.count(),
         "on_leave": len(leave_ids),
-        "services": Service.objects.count(),
-        "pending_leaves": Leave.objects.filter(status=Leave.Status.PENDING).count(),
+        "services": (Service.objects.filter(company_id=cid) if cid is not None else Service.objects).count(),
+        "pending_leaves": (Leave.objects.filter(employee__company_id=cid) if cid is not None else Leave.objects).filter(status=Leave.Status.PENDING).count(),
         "active_contracts": len(contracts),
         "contracts_by_type": dict(Counter(c.type for c in contracts)),
         "contracts_ending": [{"id": c.id, "employee": c.employee_id, "employee_name": c.employee.full_name, "type": c.type,
                               "end_date": c.end_date.isoformat()} for c in ending[:8]],
-        "open_offers": JobOffer.objects.filter(status="open", deadline__gte=today).count(),
-        "new_applications": Application.objects.filter(status=Application.Status.RECEIVED).count(),
+        "open_offers": (JobOffer.objects.filter(service__company_id=cid) if cid is not None else JobOffer.objects).filter(status="open", deadline__gte=today).count(),
+        "new_applications": (Application.objects.filter(offer__service__company_id=cid) if cid is not None else Application.objects).filter(status=Application.Status.RECEIVED).count(),
         "attendance_today": {"working_day": rules.is_working_day(today), **Counter(r["state"] for r in sheet)},
-        "headcount_by_service": list(Service.objects.annotate(n=Count("employees", filter=Q(employees__status="active")))
+        "headcount_by_service": list((Service.objects.filter(company_id=cid) if cid is not None else Service.objects)
+                                     .annotate(n=Count("employees", filter=Q(employees__status="active")))
                                      .values("id", "name", "n")),
-        "leaves_by_type": dict(Leave.objects.filter(status="approved", start_date__year=today.year)
+        "leaves_by_type": dict((Leave.objects.filter(employee__company_id=cid) if cid is not None else Leave.objects)
+                               .filter(status="approved", start_date__year=today.year)
                                .values_list("type").annotate(d=Sum("days")).values_list("type", "d")),
         "hires_by_month": [{"month": mm, "n": hires.get(mm, 0)} for mm in reversed(months)],
         "payroll": payroll,
-        "pending_list": LeaveSerializer(Leave.objects.filter(status="pending").select_related("employee__service")[:6], many=True).data,
+        "pending_list": LeaveSerializer((Leave.objects.filter(employee__company_id=cid) if cid is not None else Leave.objects).filter(status="pending").select_related("employee__service")[:6], many=True).data,
     })
 
 
